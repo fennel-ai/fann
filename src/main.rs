@@ -149,10 +149,10 @@ impl<const N: usize> ANNIndex<N> {
         }
     }
 
-    pub fn search_on_index(vector: Vector<N>, top_k: i32, index: &ANNIndex<N>) -> Vec<Vector<N>> {
+    pub fn search_on_index(&self, vector: Vector<N>, top_k: i32) -> Vec<Vector<N>> {
         // Get top_k items per tree, deduplicate them, rank them by Euc distance and return the overall top_k
         let mut initial_global_list: Vec<VectorDocument<N>> = Vec::new();
-        for tree in index.trees.iter() {
+        for tree in self.trees.iter() {
             Self::get_candidates_per_tree(vector, top_k, tree, &mut initial_global_list);
         }
         // de-duplication via our hashing method is expensive at search-time and thus we use document idx
@@ -168,6 +168,7 @@ impl<const N: usize> ANNIndex<N> {
         return final_candidates;
     }
 }
+
 
 fn main() {
     const DIM: usize = 30;
@@ -198,7 +199,7 @@ fn main() {
     let index = ANNIndex::<DIM>::build_an_index(NUM_TREES, MAX_NODE_SIZE, &my_input_data);
     // Perform ANN search
     let start = std::time::Instant::now();
-    let search_results = ANNIndex::<DIM>::search_on_index(vector, TOP_K, &index);
+    let search_results = index.search_on_index(vector, TOP_K);
     let duration = start.elapsed();
     println!("Found {} vectors via ANN-search in {}-D in {:?}", search_results.len(), DIM, duration);
 }
