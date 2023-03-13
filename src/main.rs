@@ -169,7 +169,6 @@ impl<const N: usize> ANNIndex<N> {
     }
 }
 
-
 fn main() {
     const DIM: usize = 30;
     const NUM_VECTORS: i32 = 1000000;
