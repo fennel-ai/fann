@@ -33,12 +33,6 @@ impl<const N: usize> Vector<N> {
     }
 }
 
-#[derive(Copy, Clone)]
-struct VectorDocument<const N: usize> { 
-    data: Vector<N>,
-    identifier: i32
-}
-
 struct HyperPlane<const N: usize> {
     coefficients: Vector<N>,
     constant: f32,
@@ -50,39 +44,39 @@ impl<const N: usize> HyperPlane<N> {
 }
 
 enum Node<const N: usize> { Inner(Box<InnerNode<N>>), Leaf(Box<LeafNode<N>>) }
-struct LeafNode<const N: usize> { values: Vec<VectorDocument<N>> }
+struct LeafNode<const N: usize> { values: Vec<usize> }
 struct InnerNode<const N: usize> {
     hyperplane: HyperPlane<N>,
     left_node: Node<N>,
     right_node: Node<N>,
 }
-struct ANNIndex<const N: usize> { trees: Vec<Node<N>> }
+struct ANNIndex<const N: usize> { trees: Vec<Node<N>>, values: Vec<Vector<N>> }
 impl<const N: usize> ANNIndex<N> {
-    fn build_hyperplane_bwn_two_random_points(all_points: &Vec<VectorDocument<N>>) -> (HyperPlane<N>, Vec<VectorDocument<N>>, Vec<VectorDocument<N>>) {
-        let sample: Vec<_> = all_points.choose_multiple(&mut rand::thread_rng(), 2).collect();
+    fn build_hyperplane_bwn_two_random_points(ids_of_interest: &Vec<usize>, all_vectors: &Vec<Vector<N>>) -> (HyperPlane<N>, Vec<usize>, Vec<usize>) {
+        let sample: Vec<_> = ids_of_interest.choose_multiple(&mut rand::thread_rng(), 2).collect();
         // We use implicit Cartesian equation for hyperplane n * (x - x_0) = 0. n (normal vector) is the coefs x_1 to x_n
-        let coefficients = sample[0].data.subtract_from(&sample[1].data);
-        let point_on_plane = sample[0].data.avg(&sample[1].data);
+        let coefficients = all_vectors[*sample[0]].subtract_from(&all_vectors[*sample[1]]);
+        let point_on_plane = all_vectors[*sample[0]].avg(&all_vectors[*sample[1]]);
         let constant = - coefficients.dot_product(&point_on_plane);
         // Figure out which points lie above and below
-        let mut above: Vec<VectorDocument<N>> = Vec::new();
-        let mut below: Vec<VectorDocument<N>> = Vec::new();
+        let mut above: Vec<usize> = Vec::new();
+        let mut below: Vec<usize> = Vec::new();
         let hyperplane = HyperPlane::<N> { coefficients: coefficients, constant: constant };
-        for &point in all_points.iter() {
-            if hyperplane.point_is_above(&point.data) { above.push(point) } else { below.push(point) };
+        for &id in ids_of_interest.iter() {
+            if hyperplane.point_is_above(&all_vectors[id]) { above.push(id) } else { below.push(id) };
         }
         return (hyperplane, above, below);
     }
 
-    fn build_a_tree(max_size_of_node: i32, vectors: &Vec<VectorDocument<N>>) -> Node<N> {
-        // If we have very few points, return a leaf node
-        if vectors.len() <= (max_size_of_node as usize) {
-            return Node::Leaf(Box::new(LeafNode::<N> { values: vectors.clone() }));
+    fn build_a_tree(max_size_of_node: i32, ids_of_interest: &Vec<usize>, all_vectors: &Vec<Vector<N>>) -> Node<N> {
+        // If we have very few ids of interest, return a leaf node
+        if ids_of_interest.len() <= (max_size_of_node as usize) {
+            return Node::Leaf(Box::new(LeafNode::<N> { values: ids_of_interest.clone() }));
         }
         // Otherwise, build an inner node, and recursively build left and right
-        let (hyperplane, above, below) = Self::build_hyperplane_bwn_two_random_points(vectors);
-        let node_above = Self::build_a_tree(max_size_of_node, &above);
-        let node_below = Self::build_a_tree(max_size_of_node, &below);
+        let (hyperplane, above, below) = Self::build_hyperplane_bwn_two_random_points(ids_of_interest, all_vectors);
+        let node_above = Self::build_a_tree(max_size_of_node, &above, all_vectors);
+        let node_below = Self::build_a_tree(max_size_of_node, &below, all_vectors);
         return Node::Inner(Box::new(InnerNode::<N> {
             hyperplane: hyperplane, left_node: node_below, right_node: node_above}));
     }
@@ -100,37 +94,24 @@ impl<const N: usize> ANNIndex<N> {
         return deduplicated_list;
     }
 
-    fn deduplicate_document_list(docs: &Vec<VectorDocument<N>>) -> Vec<VectorDocument<N>> {
-        let mut deduplicated_list: Vec<VectorDocument<N>> = Vec::new();
-        let mut idx_seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
-        for &doc in docs.iter() {
-            if !idx_seen.contains(&doc.identifier) {
-                idx_seen.insert(doc.identifier);
-                deduplicated_list.push(doc);
-            }
-        }
-        return deduplicated_list;
-    }
-
-    pub fn build_an_index(num_trees: i32, max_size_of_node: i32, vectors_data: &Vec<Vector<N>>) -> ANNIndex<N> {
-        let unique_vectors_data = Self::deduplicate_vector_list(vectors_data);
-        let unique_vector_documents = unique_vectors_data.iter().enumerate().map(
-            |(i, &data)| VectorDocument{data: data, identifier: i as i32}).collect();
+    pub fn build_an_index(num_trees: i32, max_size_of_node: i32, vectors: &Vec<Vector<N>>) -> ANNIndex<N> {
+        let unique_vectors = Self::deduplicate_vector_list(vectors);
+        let all_ids: Vec<usize> = (0..unique_vectors.len()).collect();
         let mut trees: Vec<Node<N>> = Vec::new();
         for _ in 0..num_trees {
-            trees.push(Self::build_a_tree(max_size_of_node, &unique_vector_documents))
+            trees.push(Self::build_a_tree(max_size_of_node, &all_ids, &unique_vectors))
         }
-        return ANNIndex::<N> { trees: trees };
+        return ANNIndex::<N> { trees: trees, values: unique_vectors };
     }
 
-    fn get_candidates_per_tree(vector: Vector<N>, num_candidates: i32, tree: &Node<N>, global_list: &mut Vec<VectorDocument<N>>) -> i32 {
+    fn get_candidates_per_tree(vector: Vector<N>, num_candidates: i32, tree: &Node<N>, candidates: &mut std::collections::HashSet<usize>) -> i32 {
         // We take everything in the leaf node we end up with. If we still need candidates, we take closer ones from the alternate subtree
         match tree {
             Node::Leaf(box_leaf) => {
                 let leaf_values = &(*box_leaf).values;
                 let num_candidates_found = std::cmp::min(num_candidates as usize, leaf_values.len());
                 for i in 0..num_candidates_found {
-                    global_list.push(leaf_values[i])
+                    candidates.insert(leaf_values[i]);
                 }
                 return num_candidates_found as i32;
             }
@@ -140,9 +121,9 @@ impl<const N: usize> ANNIndex<N> {
                 } else {
                     (&(*box_inner).left_node, &(*box_inner).right_node)
                 };
-                let mut fetched = Self::get_candidates_per_tree(vector, num_candidates, correct_tree, global_list);
+                let mut fetched = Self::get_candidates_per_tree(vector, num_candidates, correct_tree, candidates);
                 if fetched < num_candidates {
-                    fetched += Self::get_candidates_per_tree(vector, num_candidates - fetched, backup_tree, global_list);
+                    fetched += Self::get_candidates_per_tree(vector, num_candidates - fetched, backup_tree, candidates);
                 };
                 return fetched;
             }
@@ -151,19 +132,17 @@ impl<const N: usize> ANNIndex<N> {
 
     pub fn search_on_index(&self, vector: Vector<N>, top_k: i32) -> Vec<Vector<N>> {
         // Get top_k items per tree, deduplicate them, rank them by Euc distance and return the overall top_k
-        let mut initial_global_list: Vec<VectorDocument<N>> = Vec::new();
+        // Get the identifiers for the candidate vectors (identifier is the index into self.values)
+        let mut candidates: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for tree in self.trees.iter() {
-            Self::get_candidates_per_tree(vector, top_k, tree, &mut initial_global_list);
+            Self::get_candidates_per_tree(vector, top_k, tree, &mut candidates);
         }
-        // de-duplication via our hashing method is expensive at search-time and thus we use document idx
-        let unique_candidate_list = Self::deduplicate_document_list(&initial_global_list);
-        let enumerated_iter = unique_candidate_list.iter().enumerate();
-        let mut idx_sq_euc_dis: Vec<(usize, f32)> = enumerated_iter.map(|(i, can)| (i, can.data.sq_euc_dis(&vector))).collect();
+        let mut idx_sq_euc_dis: Vec<(usize, f32)> = candidates.iter().map(|&idx| (idx, self.values[idx].sq_euc_dis(&vector))).collect();
         idx_sq_euc_dis.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         let mut final_candidates: Vec<Vector<N>> = Vec::new();
-        let num_candidates_to_return = std::cmp::min(top_k as usize, unique_candidate_list.len());
+        let num_candidates_to_return = std::cmp::min(top_k as usize, candidates.len());
         for i in 0..num_candidates_to_return {
-            final_candidates.push(unique_candidate_list[idx_sq_euc_dis[i].0].data);
+            final_candidates.push(self.values[idx_sq_euc_dis[i].0]);
         }
         return final_candidates;
     }
