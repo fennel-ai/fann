@@ -44,7 +44,7 @@ impl<const N: usize> HyperPlane<N> {
 }
 
 enum Node<const N: usize> { Inner(Box<InnerNode<N>>), Leaf(Box<LeafNode<N>>) }
-struct LeafNode<const N: usize> { values: Vec<usize> }
+struct LeafNode<const N: usize>(Vec<usize>);
 struct InnerNode<const N: usize> {
     hyperplane: HyperPlane<N>,
     left_node: Node<N>,
@@ -71,7 +71,7 @@ impl<const N: usize> ANNIndex<N> {
     fn build_a_tree(max_size_of_node: i32, ids_of_interest: &Vec<usize>, all_vectors: &Vec<Vector<N>>) -> Node<N> {
         // If we have very few ids of interest, return a leaf node
         if ids_of_interest.len() <= (max_size_of_node as usize) {
-            return Node::Leaf(Box::new(LeafNode::<N> { values: ids_of_interest.clone() }));
+            return Node::Leaf(Box::new(LeafNode::<N>(ids_of_interest.clone())));
         }
         // Otherwise, build an inner node, and recursively build left and right
         let (hyperplane, above, below) = Self::build_hyperplane_bwn_two_random_points(ids_of_interest, all_vectors);
@@ -108,7 +108,7 @@ impl<const N: usize> ANNIndex<N> {
         // We take everything in the leaf node we end up with. If we still need candidates, we take closer ones from the alternate subtree
         match tree {
             Node::Leaf(box_leaf) => {
-                let leaf_values = &(*box_leaf).values;
+                let leaf_values = &(**box_leaf).0;
                 let num_candidates_found = std::cmp::min(num_candidates as usize, leaf_values.len());
                 for i in 0..num_candidates_found {
                     candidates.insert(leaf_values[i]);
@@ -181,4 +181,12 @@ fn main() {
     let search_results = index.search_on_index(vector, TOP_K);
     let duration = start.elapsed();
     println!("Found {} vectors via ANN-search in {}-D in {:?}", search_results.len(), DIM, duration);
+    // Perform a batch of ANN searches
+    let start = std::time::Instant::now();
+    for _ in 0..100 {
+        let vector = Vector(rng.gen::<[f32; DIM]>());
+        index.search_on_index(vector, TOP_K);
+    }
+    let duration = start.elapsed() / 100;
+    println!("Bulk ANN-search in {}-D has average time {:?}", DIM, duration);
 }
