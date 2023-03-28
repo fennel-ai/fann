@@ -11,3 +11,5 @@ Cargo.lock
 
 # IDE/OS-based additional files
 .DS_Store
+
+data/*
