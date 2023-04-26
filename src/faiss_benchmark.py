@@ -51,28 +51,35 @@ def load_data():
 # convert_raw_data()
 sample_data, word_to_index_map, index_to_word_map = load_data()
 
-def index_and_check_runtime(data):
+def index_and_check_runtime(
+        data, ef_search = None, ef_construction = None, max_node_size = MAX_NODE_SIZE):
     # Index this data into Faiss
     idx_start = time.time()
-    index = faiss.IndexHNSWFlat(data.shape[1], MAX_NODE_SIZE)
+    index = faiss.IndexHNSWFlat(data.shape[1], max_node_size)
+    if ef_search is not None:
+        index.hnsw.efSearch = ef_search
+    if ef_construction is not None:
+        index.hnsw.efConstruction = ef_construction
     index.add(data)
     idx_end = time.time()
-    print(f"Indexed data into HNSWFlat Index in {idx_end-idx_start} seconds")
-    total_sch_time = 0
-    for _ in range(10):
+    idx_time = idx_end - idx_start
+    print(f"Indexed data into HNSWFlat Index in {idx_time} seconds")
+    times = []
+    for _ in range(1000):
         # Take a random sample of vectors and just time search on FAISS
-        search_vectors_idx = np.random.choice(data.shape[0], 100, replace=False)
-        search_vectors = data[search_vectors_idx]
+        search_vector = data[np.random.choice(data.shape[0])].reshape(1,-1)
         sch_start = time.time()
-        index.search(search_vectors, TOP_K)
+        index.search(search_vector, TOP_K)
         sch_end = time.time()
-        total_sch_time += sch_end - sch_start
-    avg_sch_time = total_sch_time / (100 * 10)
+        times.append(sch_end - sch_start)
+    times.sort()
+    avg_sch_time = sum(times)/len(times)
+    p95_sch_time = times[950]
     print(f"Average time searching in bulk took {avg_sch_time} seconds")
-    return index, idx_end - idx_start, avg_sch_time
+    return index, idx_time, avg_sch_time, p95_sch_time
 
 
-index, _, _ = index_and_check_runtime(sample_data)
+index, _, _, _ = index_and_check_runtime(sample_data)
 
 
 def search_a_word_faiss(word):
@@ -95,10 +102,10 @@ def search_a_word_exhaustive(word):
 def display_comparison(word):
     faiss_dist, faiss_words = search_a_word_faiss(word)
     print(f"Word: {word}")
-    print(f"FAISS Euclidean Dist: {faiss_dist}")
+    print(f"FAISS Squared Euclidean Dist: {faiss_dist}")
     print(f"FAISS Words: {faiss_words}")
     ex_dist, ex_words = search_a_word_exhaustive(word)
-    print(f"Exhaustive Euclidean Dist: {ex_dist}")
+    print(f"Exhaustive Squared Euclidean Dist: {ex_dist}")
     print(f"Exhaustive Words: {ex_words}")
     print()
 
@@ -110,27 +117,18 @@ display_comparison("love")
 display_comparison("education")
 
 
-# Now, we investigate the scalability of search in term of the dimensions and num vectors
-# First, vary the dimensions from 60 to 300 in increments of 20 to see how the time to
-# index and search changes. We trivially take the first X dimensions of FastText embeddings.
-# Next, we vary the number of vectors at dim 300 from 200k to 1m in increments of 100k
-# and track changes in the time.
-num_dims_to_check = np.arange(60, 301, 20)
-indexing_time_by_num_dims = [None for _ in num_dims_to_check]
-search_time_by_num_dims = [None for _ in num_dims_to_check]
-for i, dim in enumerate(num_dims_to_check):
-    print(f"Investigating indexing and search time on dims={dim}")
-    _, idx_time, sch_time = index_and_check_runtime(sample_data[:,:dim])
-    indexing_time_by_num_dims[i] = idx_time
-    search_time_by_num_dims[i] = sch_time
-print(f"Indexing Time: {indexing_time_by_num_dims}, Search Time: {search_time_by_num_dims}")
-
-num_vectors_to_check = np.arange(200000, 1000001, 100000)
-indexing_time_by_num_vectors = [None for _ in num_vectors_to_check]
-search_time_by_num_vectors = [None for _ in num_vectors_to_check]
-for i, vec in enumerate(num_vectors_to_check):
-    print(f"Investigating indexing and search time on num_vectors={vec}")
-    _, idx_time, sch_time = index_and_check_runtime(sample_data[:vec,:])
-    indexing_time_by_num_vectors[i] = idx_time
-    search_time_by_num_vectors[i] = sch_time
-print(f"Indexing Time: {indexing_time_by_num_vectors}, Search Time: {search_time_by_num_vectors}")
+# Now, we investigate the effects of efSearch, efConstruction, num_dimensions, and num_vectors
+# on indexing / search time. We vary efSearch from 16 to 1024 in some powers of 2, efConstruction from
+# 32 to 256 in powers of 2, num_dimensions from 60 to 300 in increments of 20 (trivially taking
+# the first X dimensions of FastText embeddings).
+num_dims_to_check = np.arange(60, 301, 40)
+ef_search_to_check = [16, 64, 128, 512]
+ef_construction_to_check = [32, 64, 128]
+final_data = {}
+for dim in num_dims_to_check:
+    for ef_search in ef_search_to_check:
+        for ef_construction in ef_construction_to_check:
+            _, idx_time, avg_sch_time, p95_sch_time = index_and_check_runtime(
+                sample_data[:,:dim], ef_search, ef_construction)
+            final_data[(dim, ef_search, ef_construction)] = (idx_time, avg_sch_time, p95_sch_time)
+pickle.dump(final_data, open(f"{DATA_DIR}/faiss-benchmarks.pkl", "wb"))

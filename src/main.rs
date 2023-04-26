@@ -1,192 +1,145 @@
-use rand::{prelude::SliceRandom, Rng};
+use rand::prelude::IteratorRandom;
+use std::io::BufRead;
+mod search;
 
-#[derive(Eq, PartialEq, Hash)]
-struct HashKey<const N: usize>([u32; N]);
+fn search_exhaustive<const N: usize>(all_data: &Vec<search::Vector<N>>, vector: &search::Vector<N>, top_k: i32) -> Vec<search::Vector<N>> {
+    let enumerated_iter = all_data.iter().enumerate();
+    let mut idx_sq_euc_dis: Vec<(usize, f32)> = enumerated_iter.map(|(i, can)| (i, can.sq_euc_dis(vector))).collect();
+    idx_sq_euc_dis.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let mut final_candidates: Vec<search::Vector<N>> = Vec::new();
+    for i in 0..top_k as usize {
+        final_candidates.push(all_data[idx_sq_euc_dis[i].0])
+    }
+    return final_candidates
+}
 
-#[derive(Copy, Clone)]
-struct Vector<const N: usize> ([f32; N]);
-impl<const N: usize> Vector<N> {
-    pub fn subtract_from(&self, vector: &Vector<N>) -> Vector<N> {
-        let mapped_iter = self.0.iter().zip(vector.0).map(|(a, b)| b - a);
-        let coordinates: [f32; N] = mapped_iter.collect::<Vec<_>>().try_into().unwrap();
-        return Vector(coordinates);
-    }
-    pub fn avg(&self, vector: &Vector<N>) -> Vector<N> {
-        let mapped_iter = self.0.iter().zip(vector.0).map(|(a, b)| (a + b) / 2.0);
-        let coordinates: [f32; N] = mapped_iter.collect::<Vec<_>>().try_into().unwrap();
-        return Vector(coordinates);
-    }
-    pub fn dot_product(&self, vector: &Vector<N>) -> f32 {
-        let zipped_iter = self.0.iter().zip(vector.0);
-        return zipped_iter.map(|(a, b)| a * b).sum::<f32>();
-    }
-    pub fn to_hashkey(&self) -> HashKey<N> {
-        // f32 in Rust doesn't implement hash - we use byte representation to deduplicate which is unsafe in that it
-        // cannot differentiate ~16 mil representations of NaN under IEEE-754 but safe for our demonstration
-        let bit_iter = self.0.iter().map(|a| a.to_bits());
-        let u32_data: [u32; N] = bit_iter.collect::<Vec<_>>().try_into().unwrap();
-        return HashKey::<N>(u32_data);
-    }
-    pub fn sq_euc_dis(&self, vector: &Vector<N>) -> f32 {
-        let zipped_iter = self.0.iter().zip(vector.0);
-        return zipped_iter.map(|(a, b)| (a - b).powi(2)).sum();
+fn load_raw_wiki_data<const N: usize>(
+    filename: &str, all_data: &mut Vec<search::Vector<N>>,
+    word_to_idx_mapping: &mut std::collections::HashMap<String, usize>,
+    idx_to_word_mapping: &mut std::collections::HashMap<usize, String>) {
+    // wiki-news has 999,994 vectors in 300 dimensions
+    let file = std::fs::File::open(filename).expect("Should have been able to read the file");
+    let reader = std::io::BufReader::new(file);
+    let mut cur_idx: usize = 0;
+    // We skip the first line that simply has metadata
+    for maybe_line in reader.lines().skip(1) {
+        let line = maybe_line.expect("Should decode the line");
+        let mut data_on_line_iter = line.split_whitespace();
+        let word = data_on_line_iter.next().expect("Each line begins with a word");
+        // Update the mappings
+        word_to_idx_mapping.insert(word.to_owned(), cur_idx);
+        idx_to_word_mapping.insert(cur_idx, word.to_owned());
+        cur_idx += 1;
+        // Parse the vector. Everything except the word on the line is the vector
+        let embedding: [f32; N] = data_on_line_iter.map(|s| s.parse::<f32>().unwrap()).collect::<Vec<_>>().try_into().unwrap();
+        all_data.push(search::Vector(embedding));
     }
 }
 
-struct HyperPlane<const N: usize> {
-    coefficients: Vector<N>,
-    constant: f32,
-}
-impl<const N: usize> HyperPlane<N> {
-    pub fn point_is_above(&self, point: &Vector<N>) -> bool {
-        self.coefficients.dot_product(point) + self.constant >= 0.0
+fn build_benchmark_and_visualize_index<const N: usize>(
+    my_input_data: &Vec<search::Vector<N>>,
+    word_to_idx_mapping: &std::collections::HashMap<String, usize>,
+    idx_to_word_mapping: &std::collections::HashMap<usize, String>,
+    num_trees: i32, max_node_size: i32, top_k: i32, words_to_visualize: &Vec<String>) {
+    // Build the index
+    let start = std::time::Instant::now();
+    let my_ids: Vec<i32> = (0..my_input_data.len() as i32).collect();
+    let index = search::ANNIndex::<N>::build_an_index(
+        num_trees, max_node_size, &my_input_data, &my_ids);
+    let duration = start.elapsed();
+    println!("Build ANN index in {}-D in {:?}", N, duration);
+    // Benchmark it with 1000 sequential queries
+    let sample_idx: Vec<usize> = (0..my_input_data.len()).choose_multiple(&mut rand::thread_rng(), 1000);
+    let mut search_vectors: Vec<search::Vector<N>> = Vec::new();
+    for idx in sample_idx {
+        search_vectors.push(my_input_data[idx]);
     }
-}
-
-enum Node<const N: usize> { Inner(Box<InnerNode<N>>), Leaf(Box<LeafNode<N>>) }
-struct LeafNode<const N: usize>(Vec<usize>);
-struct InnerNode<const N: usize> {
-    hyperplane: HyperPlane<N>,
-    left_node: Node<N>,
-    right_node: Node<N>,
-}
-struct ANNIndex<const N: usize> { trees: Vec<Node<N>>, values: Vec<Vector<N>> }
-impl<const N: usize> ANNIndex<N> {
-    fn build_hyperplane_bwn_two_random_points(ids_of_interest: &Vec<usize>, all_vectors: &Vec<Vector<N>>) -> (HyperPlane<N>, Vec<usize>, Vec<usize>) {
-        let sample: Vec<_> = ids_of_interest.choose_multiple(&mut rand::thread_rng(), 2).collect();
-        // We use implicit Cartesian equation for hyperplane n * (x - x_0) = 0. n (normal vector) is the coefs x_1 to x_n
-        let coefficients = all_vectors[*sample[0]].subtract_from(&all_vectors[*sample[1]]);
-        let point_on_plane = all_vectors[*sample[0]].avg(&all_vectors[*sample[1]]);
-        let constant = - coefficients.dot_product(&point_on_plane);
-        // Figure out which points lie above and below
-        let mut above: Vec<usize> = Vec::new();
-        let mut below: Vec<usize> = Vec::new();
-        let hyperplane = HyperPlane::<N> { coefficients: coefficients, constant: constant };
-        for &id in ids_of_interest.iter() {
-            if hyperplane.point_is_above(&all_vectors[id]) { above.push(id) } else { below.push(id) };
-        }
-        return (hyperplane, above, below);
+    let start = std::time::Instant::now();
+    for i in 0..1000 {
+        index.search_approximate(search_vectors[i], top_k);
     }
-
-    fn build_a_tree(max_size_of_node: i32, ids_of_interest: &Vec<usize>, all_vectors: &Vec<Vector<N>>) -> Node<N> {
-        // If we have very few ids of interest, return a leaf node
-        if ids_of_interest.len() <= (max_size_of_node as usize) {
-            return Node::Leaf(Box::new(LeafNode::<N>(ids_of_interest.clone())));
+    let duration = start.elapsed() / 1000;
+    println!("Bulk ANN-search in {}-D has average time {:?}", N, duration);
+    // Visualize the results for some words
+    for word in words_to_visualize.iter() {
+        println!("Currently visualizing {}", word);
+        let word_index = word_to_idx_mapping[word];
+        let embedding = my_input_data[word_index];
+        let nearby_idx_and_distance = index.search_approximate(embedding, top_k);
+        for &(idx, distance) in nearby_idx_and_distance.iter() {
+            println!("{}, sq distance={}", idx_to_word_mapping[&(idx as usize)], distance);
         }
-        // Otherwise, build an inner node, and recursively build left and right
-        let (hyperplane, above, below) = Self::build_hyperplane_bwn_two_random_points(ids_of_interest, all_vectors);
-        let node_above = Self::build_a_tree(max_size_of_node, &above, all_vectors);
-        let node_below = Self::build_a_tree(max_size_of_node, &below, all_vectors);
-        return Node::Inner(Box::new(InnerNode::<N> {
-            hyperplane: hyperplane, left_node: node_below, right_node: node_above}));
-    }
-
-    fn deduplicate_vector_list(vectors: &Vec<Vector<N>>) -> Vec<Vector<N>> {
-        let mut deduplicated_list: Vec<Vector<N>> = Vec::new();
-        let mut hashes_seen: std::collections::HashSet<HashKey<N>> = std::collections::HashSet::new();
-        for &vector in vectors.iter() {
-            let hash_key = vector.to_hashkey();
-            if !hashes_seen.contains(&hash_key) {
-                hashes_seen.insert(hash_key);
-                deduplicated_list.push(vector);
-            }
-        }
-        return deduplicated_list;
-    }
-
-    pub fn build_an_index(num_trees: i32, max_size_of_node: i32, vectors: &Vec<Vector<N>>) -> ANNIndex<N> {
-        let unique_vectors = Self::deduplicate_vector_list(vectors);
-        let all_ids: Vec<usize> = (0..unique_vectors.len()).collect();
-        let mut trees: Vec<Node<N>> = Vec::new();
-        for _ in 0..num_trees {
-            trees.push(Self::build_a_tree(max_size_of_node, &all_ids, &unique_vectors))
-        }
-        return ANNIndex::<N> { trees: trees, values: unique_vectors };
-    }
-
-    fn get_candidates_per_tree(vector: Vector<N>, num_candidates: i32, tree: &Node<N>, candidates: &mut std::collections::HashSet<usize>) -> i32 {
-        // We take everything in the leaf node we end up with. If we still need candidates, we take closer ones from the alternate subtree
-        match tree {
-            Node::Leaf(box_leaf) => {
-                let leaf_values = &(**box_leaf).0;
-                let num_candidates_found = std::cmp::min(num_candidates as usize, leaf_values.len());
-                for i in 0..num_candidates_found {
-                    candidates.insert(leaf_values[i]);
-                }
-                return num_candidates_found as i32;
-            }
-            Node::Inner(box_inner) => {
-                let (correct_tree, backup_tree) = if (*box_inner).hyperplane.point_is_above(&vector) {
-                    (&(*box_inner).right_node, &(*box_inner).left_node)
-                } else {
-                    (&(*box_inner).left_node, &(*box_inner).right_node)
-                };
-                let mut fetched = Self::get_candidates_per_tree(vector, num_candidates, correct_tree, candidates);
-                if fetched < num_candidates {
-                    fetched += Self::get_candidates_per_tree(vector, num_candidates - fetched, backup_tree, candidates);
-                };
-                return fetched;
-            }
-        }
-    }
-
-    pub fn search_on_index(&self, vector: Vector<N>, top_k: i32) -> Vec<Vector<N>> {
-        // Get top_k items per tree, deduplicate them, rank them by Euc distance and return the overall top_k
-        // Get the identifiers for the candidate vectors (identifier is the index into self.values)
-        let mut candidates: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for tree in self.trees.iter() {
-            Self::get_candidates_per_tree(vector, top_k, tree, &mut candidates);
-        }
-        let mut idx_sq_euc_dis: Vec<(usize, f32)> = candidates.iter().map(|&idx| (idx, self.values[idx].sq_euc_dis(&vector))).collect();
-        idx_sq_euc_dis.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        let mut final_candidates: Vec<Vector<N>> = Vec::new();
-        let num_candidates_to_return = std::cmp::min(top_k as usize, candidates.len());
-        for i in 0..num_candidates_to_return {
-            final_candidates.push(self.values[idx_sq_euc_dis[i].0]);
-        }
-        return final_candidates;
     }
 }
-
 
 fn main() {
-    const DIM: usize = 30;
-    const NUM_VECTORS: i32 = 1000000;
+    const DIM: usize = 300;
     const NUM_TREES: i32 = 3;
     const TOP_K: i32 = 20;
     const MAX_NODE_SIZE : i32 = 15;
-    // Generate the data
+    // Parse the data from wiki-news
     let start = std::time::Instant::now();
-    let mut rng = rand::thread_rng();
-    let my_input_data: Vec<Vector<DIM>> = (1..NUM_VECTORS).map(|_x| Vector(rng.gen::<[f32; DIM]>())).collect();
+    let mut my_input_data: Vec<search::Vector<DIM>> = Vec::new();
+    let mut word_to_idx_mapping: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut idx_to_word_mapping: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    load_raw_wiki_data::<DIM>(
+        "data/wiki-news-300d-1M.vec", &mut my_input_data, 
+        &mut word_to_idx_mapping, &mut idx_to_word_mapping);
     let duration = start.elapsed();
-    let vector = Vector(rng.gen::<[f32; DIM]>());
-    println!("Generated {} vectors in {}-D in {:?}", NUM_VECTORS, DIM, duration);
-    // Try the naive exact-search for TOP_K elements - if TOP_K << log(NUM_VECTORS) then
-    // this runs in O(TOP_K * DIM * NUM_VECTORS) else O(DIM * NUM_VECTORS * log(NUM_VECTORS))
+    println!("Parsed {} vectors in {}-D in {:?}", my_input_data.len(), DIM, duration);
+    // Try the naive exact-search for TOP_K elements
     let start = std::time::Instant::now();
-    let enumerated_iter = my_input_data.iter().enumerate();
-    let mut idx_sq_euc_dis: Vec<(usize, f32)> = enumerated_iter.map(|(i, can)| (i, can.sq_euc_dis(&vector))).collect();
-    idx_sq_euc_dis.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let mut final_candidates_brute: Vec<Vector<DIM>> = Vec::new();
-    for i in 0..TOP_K as usize {
-        final_candidates_brute.push(my_input_data[idx_sq_euc_dis[i].0])
+    let brute_results = search_exhaustive::<DIM>(&my_input_data, &my_input_data[0], TOP_K);
+    let duration = start.elapsed();
+    println!("Found {} vectors via brute-search in {}-D in {:?}", brute_results.len(), DIM, duration);
+    // Main parameters
+    let input_words = ["river", "war", "love", "education"];
+    let words_to_visualize: Vec<String> = input_words.into_iter().map(|x| x.to_owned()).collect();
+    build_benchmark_and_visualize_index::<DIM>(
+        &my_input_data, &word_to_idx_mapping, &idx_to_word_mapping,
+        NUM_TREES, MAX_NODE_SIZE, TOP_K, &words_to_visualize);
+    // See how run-times change based on parameters
+    const DIM_60: usize = 60;
+    let mut data_dim_60: Vec<search::Vector<DIM_60>> = Vec::new();
+    const DIM_120: usize = 120;
+    let mut data_dim_120: Vec<search::Vector<DIM_120>> = Vec::new();
+    const DIM_200: usize = 200;
+    let mut data_dim_200: Vec<search::Vector<DIM_200>> = Vec::new();
+    for vector in my_input_data.iter() {
+        let dim_60: [f32; DIM_60] = (vector.0)[0..DIM_60].try_into().unwrap();
+        let dim_120: [f32; DIM_120] = (vector.0)[0..DIM_120].try_into().unwrap();
+        let dim_200: [f32; DIM_200] = (vector.0)[0..DIM_200].try_into().unwrap();
+        data_dim_60.push(search::Vector(dim_60));
+        data_dim_120.push(search::Vector(dim_120));
+        data_dim_200.push(search::Vector(dim_200));
     }
-    let duration = start.elapsed();
-    println!("Found {} vectors via brute-search in {}-D in {:?}", final_candidates_brute.len(), DIM, duration);
-    // Build the ANN index
-    let index = ANNIndex::<DIM>::build_an_index(NUM_TREES, MAX_NODE_SIZE, &my_input_data);
-    // Perform ANN search
-    let start = std::time::Instant::now();
-    let search_results = index.search_on_index(vector, TOP_K);
-    let duration = start.elapsed();
-    println!("Found {} vectors via ANN-search in {}-D in {:?}", search_results.len(), DIM, duration);
-    // Perform a batch of ANN searches
-    let start = std::time::Instant::now();
-    for _ in 0..100 {
-        let vector = Vector(rng.gen::<[f32; DIM]>());
-        index.search_on_index(vector, TOP_K);
+    let no_words: Vec<String> = Vec::new();
+    for num_trees in [3, 5, 9, 15] {
+        for max_node_size in [5, 15, 30] {
+            build_benchmark_and_visualize_index::<DIM_60>(
+                &data_dim_60, &word_to_idx_mapping, &idx_to_word_mapping,
+                num_trees, max_node_size, TOP_K, &no_words);
+        }
     }
-    let duration = start.elapsed() / 100;
-    println!("Bulk ANN-search in {}-D has average time {:?}", DIM, duration);
+    for num_trees in [3, 5, 9, 15] {
+        for max_node_size in [5, 15, 30] {
+            build_benchmark_and_visualize_index::<DIM_120>(
+                &data_dim_120, &word_to_idx_mapping, &idx_to_word_mapping,
+                num_trees, max_node_size, TOP_K, &no_words);
+        }
+    }
+    for num_trees in [3, 5, 9, 15] {
+        for max_node_size in [5, 15, 30] {
+            build_benchmark_and_visualize_index::<DIM_200>(
+                &data_dim_200, &word_to_idx_mapping, &idx_to_word_mapping,
+                num_trees, max_node_size, TOP_K, &no_words);
+        }
+    }
+    for num_trees in [3, 5, 9, 15] {
+        for max_node_size in [5, 15, 30] {
+            build_benchmark_and_visualize_index::<DIM>(
+                &my_input_data, &word_to_idx_mapping, &idx_to_word_mapping,
+                num_trees, max_node_size, TOP_K, &no_words);
+        }
+    }
 }
