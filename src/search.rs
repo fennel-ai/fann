@@ -59,7 +59,6 @@ impl<const N: usize> ANNIndex<N> {
         let coefficients = all_vectors[*sample[0]].subtract_from(&all_vectors[*sample[1]]);
         let point_on_plane = all_vectors[*sample[0]].avg(&all_vectors[*sample[1]]);
         let constant = - coefficients.dot_product(&point_on_plane);
-        // Figure out which points lie above and below
         let mut above: Vec<usize> = Vec::new();
         let mut below: Vec<usize> = Vec::new();
         let hyperplane = HyperPlane::<N> { coefficients: coefficients, constant: constant };
@@ -73,7 +72,6 @@ impl<const N: usize> ANNIndex<N> {
         if indexes_of_interest.len() <= (max_size_of_node as usize) {
             return Node::Leaf(Box::new(LeafNode::<N>(indexes_of_interest.clone())));
         }
-        // Otherwise, build an inner node, and recursively build left and right
         let (hyperplane, above, below) = Self::build_hyperplane_bwn_two_random_points(indexes_of_interest, all_vectors);
         let node_above = Self::build_a_tree(max_size_of_node, &above, all_vectors);
         let node_below = Self::build_a_tree(max_size_of_node, &below, all_vectors);
