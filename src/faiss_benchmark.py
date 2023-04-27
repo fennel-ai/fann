@@ -52,7 +52,8 @@ def load_data():
 sample_data, word_to_index_map, index_to_word_map = load_data()
 
 def index_and_check_runtime(
-        data, ef_search = None, ef_construction = None, max_node_size = MAX_NODE_SIZE):
+        data, ef_search = None, ef_construction = None, 
+        max_node_size = MAX_NODE_SIZE, print_all_distances = False):
     # Index this data into Faiss
     idx_start = time.time()
     index = faiss.IndexHNSWFlat(data.shape[1], max_node_size)
@@ -64,22 +65,25 @@ def index_and_check_runtime(
     idx_end = time.time()
     idx_time = idx_end - idx_start
     print(f"Indexed data into HNSWFlat Index in {idx_time} seconds")
-    times = []
-    for _ in range(1000):
+    search_data = data[np.random.choice(data.shape[0], size=1000)].reshape(1000, 1, -1)
+    sch_start = time.time()
+    for i in range(1000):
         # Take a random sample of vectors and just time search on FAISS
-        search_vector = data[np.random.choice(data.shape[0])].reshape(1,-1)
-        sch_start = time.time()
-        index.search(search_vector, TOP_K)
-        sch_end = time.time()
-        times.append(sch_end - sch_start)
-    times.sort()
-    avg_sch_time = sum(times)/len(times)
-    p95_sch_time = times[950]
+        index.search(search_data[i], TOP_K)
+    sch_end = time.time()
+    avg_sch_time = (sch_end - sch_start) / 1000
     print(f"Average time searching in bulk took {avg_sch_time} seconds")
-    return index, idx_time, avg_sch_time, p95_sch_time
+    all_distances = []
+    for vector in data:
+        D, _ = index.search(vector.reshape(1,-1), TOP_K)
+        all_distances.append(sum(D[0]**(1/2)) / len(D[0]))
+    print(f"Average Euclidean Distance = {sum(all_distances)/len(all_distances)}")
+    if print_all_distances:
+        print(all_distances)
+    return index
 
 
-index, _, _, _ = index_and_check_runtime(sample_data)
+index = index_and_check_runtime(sample_data, print_all_distances=True)
 
 
 def search_a_word_faiss(word):
@@ -87,14 +91,14 @@ def search_a_word_faiss(word):
     search[0] = sample_data[word_to_index_map[word]]
     D, I = index.search(search, TOP_K)
     words = [index_to_word_map[I[0][i]] for i in range(I.shape[1])]
-    return D[0], words
+    return D[0]**(1/2), words
 
 
 def search_a_word_exhaustive(word):
     data = sample_data[word_to_index_map[word]]
-    sq_euc_distances = ((sample_data - data)**2).sum(axis=1)
-    first_k_indices = sq_euc_distances.argsort()[:TOP_K]
-    distances = [sq_euc_distances[idx] for idx in first_k_indices]
+    euc_distances = ((sample_data - data)**2).sum(axis=1)**(1/2)
+    first_k_indices = euc_distances.argsort()[:TOP_K]
+    distances = [euc_distances[idx] for idx in first_k_indices]
     words = [index_to_word_map[idx] for idx in first_k_indices]
     return distances, words
 
@@ -102,10 +106,10 @@ def search_a_word_exhaustive(word):
 def display_comparison(word):
     faiss_dist, faiss_words = search_a_word_faiss(word)
     print(f"Word: {word}")
-    print(f"FAISS Squared Euclidean Dist: {faiss_dist}")
+    print(f"FAISS Euclidean Dist: {faiss_dist}")
     print(f"FAISS Words: {faiss_words}")
     ex_dist, ex_words = search_a_word_exhaustive(word)
-    print(f"Exhaustive Squared Euclidean Dist: {ex_dist}")
+    print(f"Exhaustive Euclidean Dist: {ex_dist}")
     print(f"Exhaustive Words: {ex_words}")
     print()
 
@@ -116,19 +120,15 @@ display_comparison("war")
 display_comparison("love")
 display_comparison("education")
 
-
+# We can choose to benchmark FAISS HNSWFlat
 # Now, we investigate the effects of efSearch, efConstruction, num_dimensions, and num_vectors
 # on indexing / search time. We vary efSearch from 16 to 1024 in some powers of 2, efConstruction from
 # 32 to 256 in powers of 2, num_dimensions from 60 to 300 in increments of 20 (trivially taking
 # the first X dimensions of FastText embeddings).
-num_dims_to_check = np.arange(60, 301, 40)
-ef_search_to_check = [16, 64, 128, 512]
-ef_construction_to_check = [32, 64, 128]
-final_data = {}
-for dim in num_dims_to_check:
-    for ef_search in ef_search_to_check:
-        for ef_construction in ef_construction_to_check:
-            _, idx_time, avg_sch_time, p95_sch_time = index_and_check_runtime(
-                sample_data[:,:dim], ef_search, ef_construction)
-            final_data[(dim, ef_search, ef_construction)] = (idx_time, avg_sch_time, p95_sch_time)
-pickle.dump(final_data, open(f"{DATA_DIR}/faiss-benchmarks.pkl", "wb"))
+# num_dims_to_check = np.arange(60, 301, 40)
+# ef_search_to_check = [16, 64, 128, 512]
+# ef_construction_to_check = [32, 64, 128]
+# for dim in num_dims_to_check:
+#     for ef_search in ef_search_to_check:
+#         for ef_construction in ef_construction_to_check:
+#             index_and_check_runtime(sample_data[:,:dim], ef_search, ef_construction)

@@ -36,11 +36,14 @@ fn load_raw_wiki_data<const N: usize>(
     }
 }
 
-fn build_benchmark_and_visualize_index<const N: usize>(
+fn build_benchmark_and_visualize_index<const N: usize, const MAX_N: usize>(
     my_input_data: &Vec<search::Vector<N>>,
     word_to_idx_mapping: &std::collections::HashMap<String, usize>,
     idx_to_word_mapping: &std::collections::HashMap<usize, String>,
-    num_trees: i32, max_node_size: i32, top_k: i32, words_to_visualize: &Vec<String>) {
+    num_trees: i32, max_node_size: i32, top_k: i32, words_to_visualize: &Vec<String>,
+    highest_dim_input_data: &Vec<search::Vector<MAX_N>>,
+    print_all_distances: bool) {
+    println!("dimensions={}, num_trees={}, max_node_size={}, top_k={}", N, num_trees, max_node_size, top_k);
     // Build the index
     let start = std::time::Instant::now();
     let my_ids: Vec<i32> = (0..my_input_data.len() as i32).collect();
@@ -60,6 +63,24 @@ fn build_benchmark_and_visualize_index<const N: usize>(
     }
     let duration = start.elapsed() / 1000;
     println!("Bulk ANN-search in {}-D has average time {:?}", N, duration);
+    // Calculate the average distance. The distances are computed against the full 300-D embeddings
+    // and not the reduced dimensionality in the index.
+    let mut distances = Vec::new();
+    for (i, &vector) in my_input_data.iter().enumerate() {
+        // Ignore the distance here since we must compute it against the full 300-D embedding
+        let id_and_sq_dist = index.search_approximate(vector, top_k);
+        let mut total_dist = 0.0;
+        for &(id, _) in id_and_sq_dist.iter() {
+            total_dist += highest_dim_input_data[i].sq_euc_dis(&highest_dim_input_data[id as usize]).sqrt()
+        }
+        distances.push(total_dist / id_and_sq_dist.len() as f32);
+    }
+    let total_dist: f32 = distances.iter().sum();
+    let average_dist =  total_dist / distances.len() as f32;
+    println!("Average Euclidean Distance = {}", average_dist);
+    if print_all_distances {
+        println!("{:?}", distances)
+    }
     // Visualize the results for some words
     for word in words_to_visualize.iter() {
         println!("Currently visualizing {}", word);
@@ -95,51 +116,40 @@ fn main() {
     // Main parameters
     let input_words = ["river", "war", "love", "education"];
     let words_to_visualize: Vec<String> = input_words.into_iter().map(|x| x.to_owned()).collect();
-    build_benchmark_and_visualize_index::<DIM>(
+    build_benchmark_and_visualize_index::<DIM, DIM>(
         &my_input_data, &word_to_idx_mapping, &idx_to_word_mapping,
-        NUM_TREES, MAX_NODE_SIZE, TOP_K, &words_to_visualize);
+        NUM_TREES, MAX_NODE_SIZE, TOP_K, &words_to_visualize, &my_input_data, true);
     // See how run-times change based on parameters
     const DIM_60: usize = 60;
     let mut data_dim_60: Vec<search::Vector<DIM_60>> = Vec::new();
-    const DIM_120: usize = 120;
-    let mut data_dim_120: Vec<search::Vector<DIM_120>> = Vec::new();
-    const DIM_200: usize = 200;
-    let mut data_dim_200: Vec<search::Vector<DIM_200>> = Vec::new();
+    const DIM_150: usize = 150;
+    let mut data_dim_150: Vec<search::Vector<DIM_150>> = Vec::new();
     for vector in my_input_data.iter() {
         let dim_60: [f32; DIM_60] = (vector.0)[0..DIM_60].try_into().unwrap();
-        let dim_120: [f32; DIM_120] = (vector.0)[0..DIM_120].try_into().unwrap();
-        let dim_200: [f32; DIM_200] = (vector.0)[0..DIM_200].try_into().unwrap();
+        let dim_150: [f32; DIM_150] = (vector.0)[0..DIM_150].try_into().unwrap();
         data_dim_60.push(search::Vector(dim_60));
-        data_dim_120.push(search::Vector(dim_120));
-        data_dim_200.push(search::Vector(dim_200));
+        data_dim_150.push(search::Vector(dim_150));
     }
     let no_words: Vec<String> = Vec::new();
-    for num_trees in [3, 5, 9, 15] {
+    for num_trees in [3, 9, 15] {
         for max_node_size in [5, 15, 30] {
-            build_benchmark_and_visualize_index::<DIM_60>(
+            build_benchmark_and_visualize_index::<DIM_60, DIM>(
                 &data_dim_60, &word_to_idx_mapping, &idx_to_word_mapping,
-                num_trees, max_node_size, TOP_K, &no_words);
+                num_trees, max_node_size, TOP_K, &no_words, &my_input_data, false);
         }
     }
-    for num_trees in [3, 5, 9, 15] {
+    for num_trees in [3, 9, 15] {
         for max_node_size in [5, 15, 30] {
-            build_benchmark_and_visualize_index::<DIM_120>(
-                &data_dim_120, &word_to_idx_mapping, &idx_to_word_mapping,
-                num_trees, max_node_size, TOP_K, &no_words);
+            build_benchmark_and_visualize_index::<DIM_150, DIM>(
+                &data_dim_150, &word_to_idx_mapping, &idx_to_word_mapping,
+                num_trees, max_node_size, TOP_K, &no_words, &my_input_data, false);
         }
     }
-    for num_trees in [3, 5, 9, 15] {
+    for num_trees in [3, 9, 15] {
         for max_node_size in [5, 15, 30] {
-            build_benchmark_and_visualize_index::<DIM_200>(
-                &data_dim_200, &word_to_idx_mapping, &idx_to_word_mapping,
-                num_trees, max_node_size, TOP_K, &no_words);
-        }
-    }
-    for num_trees in [3, 5, 9, 15] {
-        for max_node_size in [5, 15, 30] {
-            build_benchmark_and_visualize_index::<DIM>(
+            build_benchmark_and_visualize_index::<DIM, DIM>(
                 &my_input_data, &word_to_idx_mapping, &idx_to_word_mapping,
-                num_trees, max_node_size, TOP_K, &no_words);
+                num_trees, max_node_size, TOP_K, &no_words, &my_input_data, false);
         }
     }
 }
