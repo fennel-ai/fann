@@ -146,7 +146,7 @@ impl<const N: usize> ANNIndex<N> {
         // We take everything in the leaf node. If we still need, we take ones from the alternate subtree
         match tree {
             Node::Leaf(box_leaf) => {
-                let leaf_values = &(**box_leaf).0;
+                let leaf_values = &(box_leaf.0);
                 let num_candidates_found = std::cmp::min(n as usize, leaf_values.len());
                 for i in 0..num_candidates_found {
                     candidates.insert(leaf_values[i]);
@@ -156,9 +156,9 @@ impl<const N: usize> ANNIndex<N> {
             Node::Inner(box_inner) => {
                 let (correct_tree, backup_tree) = if (*box_inner).hyperplane.point_is_above(&vector)
                 {
-                    (&(*box_inner).right_node, &(*box_inner).left_node)
+                    (&(box_inner.right_node), &(box_inner.left_node))
                 } else {
-                    (&(*box_inner).left_node, &(*box_inner).right_node)
+                    (&(box_inner.left_node), &(box_inner.right_node))
                 };
                 let mut fetched = Self::tree_result(vector, n, correct_tree, candidates);
                 if fetched < n {
