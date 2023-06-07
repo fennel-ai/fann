@@ -1,6 +1,15 @@
+#!/bin/bash
+
+# This benchmarking script is responsible for:
+# 1) Making the data directory if needed
+# 2) Download the FastText embeddings if not available locally
+# 3) Run the FAISS HNSW benchmarking
+# 4) Run the Rust Annoy Index logic
+
 # Make the data folder if not exists
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-DATA_DIR="$( cd "${SCRIPT_DIR}/../data" >/dev/null 2>&1 && pwd )"
+ROOT_DIR="$( cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd )"
+DATA_DIR="$ROOT_DIR/data"
 mkdir -p "$DATA_DIR"
 
 # Download the wikidata data file if not exists
@@ -21,4 +30,8 @@ FAISS_FILE="${SCRIPT_DIR}/faiss_run.py"
 python3 "$FAISS_FILE" --input-vec "$WIKIDATA_FILE" --data-dir "$DATA_DIR"
 
 # Benchmark our Rust index
-#TODO
+CWD_TO_PRESERVE=$(pwd)
+cd "$ROOT_DIR"
+cargo build --release
+./target/release/ann "$DATA_DIR" "$WIKIDATA_FILE"
+cd "$CWD_TO_PRESERVE"

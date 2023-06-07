@@ -4,6 +4,7 @@ use std::io::BufRead;
 mod search;
 use search::{ANNIndex, Vector};
 use std::collections::{HashMap, HashSet};
+use clap::{App, Arg, ArgMatches};
 
 fn search_exhaustive<const N: usize>(
     all_data: &Vec<Vector<N>>,
@@ -67,15 +68,11 @@ fn search_approximate_as_hashset<const N: usize>(
     return id_hashset;
 }
 
-fn build_benchmark_and_visualize_index<const N: usize>(
+fn build_and_benchmark_index<const N: usize>(
     my_input_data: &Vec<Vector<N>>,
-    word_to_idx_mapping: &HashMap<String, usize>,
-    idx_to_word_mapping: &HashMap<usize, String>,
     num_trees: i32,
     max_node_size: i32,
     top_k: i32,
-    indices_of_interest: &Vec<i32>,
-    words_to_visualize: &Vec<String>,
 ) -> Vec<HashSet<i32>> {
     println!(
         "dimensions={}, num_trees={}, max_node_size={}, top_k={}",
@@ -84,14 +81,14 @@ fn build_benchmark_and_visualize_index<const N: usize>(
     // Build the index
     let start = std::time::Instant::now();
     let my_ids: Vec<i32> = (0..my_input_data.len() as i32).collect();
-    let index = search::ANNIndex::<N>::build_index(
+    let index = ANNIndex::<N>::build_index(
         num_trees,
         max_node_size,
         &my_input_data,
         &my_ids,
     );
     let duration = start.elapsed();
-    println!("Build ANN index in {}-D in {:?}", N, duration);
+    println!("Built ANN index in {}-D in {:?}", N, duration);
     // Benchmark it with 1000 sequential queries
     let sample_idx: Vec<i32> = (0..my_input_data.len() as i32)
         .choose_multiple(&mut rand::thread_rng(), 1000);
@@ -105,35 +102,16 @@ fn build_benchmark_and_visualize_index<const N: usize>(
     }
     let duration = start.elapsed() / 1000;
     println!("Bulk ANN-search in {}-D has average time {:?}", N, duration);
-    // Visualize the results for some words
-    for word in words_to_visualize.iter() {
-        println!("Currently visualizing {}", word);
-        let word_index = word_to_idx_mapping[word];
-        let embedding = my_input_data[word_index];
-        let nearby_idx_and_distance =
-            index.search_approximate(embedding, top_k);
-        for &(idx, distance) in nearby_idx_and_distance.iter() {
-            println!(
-                "{}, distance={}",
-                idx_to_word_mapping[&(idx as usize)],
-                distance.sqrt()
-            );
-        }
-    }
-    // For the indices of interest, find the top_k neighbours and return that data
+    // For all indices, find the top_k neighbours and return that data
     let start = std::time::Instant::now();
-    let index_results = indices_of_interest
+    let index_results = my_input_data
         .par_iter()
-        .map(|&idx| {
-            search_approximate_as_hashset(
-                &index,
-                my_input_data[idx as usize],
-                top_k,
-            )
+        .map(|&vector| {
+            search_approximate_as_hashset(&index, vector, top_k)
         })
         .collect();
     let duration = start.elapsed();
-    println!("Collected sample of index quality in {:?}", duration);
+    println!("Collected index quality results in {:?}", duration);
     return index_results;
 }
 
@@ -176,39 +154,37 @@ fn calculate_metrics_on_index_result<const N: usize>(
 }
 
 fn main() {
+    // Parse command line arguments
+    let data_dir_arg = Arg::with_name("data-dir").takes_value(true).required(true);
+    let input_vec_arg = Arg::with_name("input-vec").takes_value(true).required(true);
+    let app = App::new("FANN").arg(data_dir_arg).arg(input_vec_arg);
+    let matches = app.get_matches();
+    let data_dir = matches.value_of("data-dir").unwrap();
+    let input_vec_path = matches.value_of("input-vec").unwrap();
+    // Parse the data from wiki-news
     const DIM: usize = 300;
     const TOP_K: i32 = 20;
-    // Parse the data from wiki-news
     let start = std::time::Instant::now();
     let mut my_input_data: Vec<search::Vector<DIM>> = Vec::new();
-    let mut word_to_idx_mapping: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let mut idx_to_word_mapping: std::collections::HashMap<usize, String> =
-        std::collections::HashMap::new();
+    let mut word_to_idx_mapping: HashMap<String, usize> = HashMap::new();
+    let mut idx_to_word_mapping: HashMap<usize, String> = HashMap::new();
     load_raw_wiki_data::<DIM>(
-        "data/wiki-news-300d-1M.vec",
+        input_vec_path,
         &mut my_input_data,
         &mut word_to_idx_mapping,
         &mut idx_to_word_mapping,
     );
     let duration = start.elapsed();
-    println!(
-        "Parsed {} vectors in {}-D in {:?}",
-        my_input_data.len(),
-        DIM,
-        duration
-    );
+    println!("Parsed {} vectors in {:?}", my_input_data.len(), duration);
     // Try the naive exact-search for TOP_K elements
     let start = std::time::Instant::now();
     search_exhaustive::<DIM>(&my_input_data, &my_input_data[0], TOP_K);
     let duration = start.elapsed();
-    println!(
-        "Found vectors via brute-search in {}-D in {:?}",
-        DIM, duration
-    );
-    // Take 1000 random vectors from the input data and find its TOP_K nearest neighbors using the
-    // exhaustive/brute-force approach. This allows us to calculate recall for our implementations.
-    // This is a list of randomly chosen indices from our main embedding set - we use a subset to
+    println!("Found vectors via brute-search in {:?}", duration);
+    // Take 1000 random vectors from the input data and find its TOP_K nearest 
+    // neighbors using the exhaustive/brute-force approach. This allows us to 
+    // calculate recall for our implementations. This is a list of randomly chosen 
+    // indices from our main embedding set - we use a subset to
     // estimate our metrics due to the computation cost.
     let start = std::time::Instant::now();
     rayon::ThreadPoolBuilder::new()
@@ -217,8 +193,10 @@ fn main() {
         .unwrap();
     let sample_idx: Vec<i32> = (0..my_input_data.len() as i32)
         .choose_multiple(&mut rand::thread_rng(), 1000);
-    // Make a vector of hashsets where hashset at position i represents the exhaustive nearest neighbours
-    // for the embedding at position idx in my_input_data, where idx is at position i in sample_idx.
+    // Make a vector of hashsets where hashset at position i represents the exhaustive 
+    // nearest neighbours for the embedding at position idx in my_input_data, where idx 
+    // is at position i in sample_idx. This means [exhaustive_results] and [sample_idx]
+    // are perfectly aligned / lined-up
     let exhaustive_results: Vec<std::collections::HashSet<i32>> = sample_idx
         .par_iter()
         .map(|&idx| {
@@ -230,49 +208,37 @@ fn main() {
         })
         .collect();
     let duration = start.elapsed();
-    println!(
-        "Found exhaustive neighbors for sample to calculate recall in {:?}",
-        duration
+    println!("Found exhaustive neighbors for sample in {:?}", duration);
+    // Build, benchmark and visualize our index with default parameters
+    let words_to_visualize: Vec<String> = ["river", "war", "love", "education"].into_iter().map(|x| x.to_owned()).collect();
+    let index_results = build_and_benchmark_index::<DIM>(
+        &my_input_data, 3, 15, TOP_K,
     );
-    // Main parameters
-    let input_words = ["river", "war", "love", "education"];
-    let words_to_visualize: Vec<String> =
-        input_words.into_iter().map(|x| x.to_owned()).collect();
-    let index_results = build_benchmark_and_visualize_index::<DIM>(
-        &my_input_data,
-        &word_to_idx_mapping,
-        &idx_to_word_mapping,
-        3,
-        15,
-        TOP_K,
-        &sample_idx,
-        &words_to_visualize,
-    );
-    calculate_metrics_on_index_result::<DIM>(
-        &my_input_data,
-        &exhaustive_results,
-        &index_results,
-    );
-    // Try some other parameters. New values for max_node_size, num_trees at dim=300. See how we can make it
-    // better in its accuracy/ quality.
-    let no_words: Vec<String> = Vec::new();
-    for num_trees in [3, 9, 15] {
-        for max_node_size in [5, 15, 30] {
-            let index_results = build_benchmark_and_visualize_index::<DIM>(
-                &my_input_data,
-                &word_to_idx_mapping,
-                &idx_to_word_mapping,
-                num_trees,
-                max_node_size,
-                TOP_K,
-                &sample_idx,
-                &no_words,
-            );
-            calculate_metrics_on_index_result::<DIM>(
-                &my_input_data,
-                &exhaustive_results,
-                &index_results,
-            );
-        }
-    }
+    // calculate_metrics_on_index_result::<DIM>(
+    //     &my_input_data,
+    //     &exhaustive_results,
+    //     &index_results,
+    // );
+    // // Try some other parameters. New values for max_node_size, num_trees at dim=300. See how we can make it
+    // // better in its accuracy/ quality.
+    // let no_words: Vec<String> = Vec::new();
+    // for num_trees in [3, 9, 15] {
+    //     for max_node_size in [5, 15, 30] {
+    //         let index_results = build_benchmark_and_visualize_index::<DIM>(
+    //             &my_input_data,
+    //             &word_to_idx_mapping,
+    //             &idx_to_word_mapping,
+    //             num_trees,
+    //             max_node_size,
+    //             TOP_K,
+    //             &sample_idx,
+    //             &no_words,
+    //         );
+    //         calculate_metrics_on_index_result::<DIM>(
+    //             &my_input_data,
+    //             &exhaustive_results,
+    //             &index_results,
+    //         );
+    //     }
+    // }
 }
