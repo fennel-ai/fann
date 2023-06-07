@@ -1,4 +1,6 @@
+use itertools::Itertools;
 use rand::prelude::SliceRandom;
+use std::{cmp::min, collections::HashSet};
 
 #[derive(Eq, PartialEq, Hash)]
 pub struct HashKey<const N: usize>([u32; N]);
@@ -17,25 +19,25 @@ impl<const N: usize> HyperPlane<N> {
 pub struct Vector<const N: usize>(pub [f32; N]);
 impl<const N: usize> Vector<N> {
     pub fn subtract_from(&self, vector: &Vector<N>) -> Vector<N> {
-        let mapped_iter = self.0.iter().zip(vector.0).map(|(a, b)| b - a);
-        let coordinates: [f32; N] = mapped_iter.collect::<Vec<_>>().try_into().unwrap();
-        return Vector(coordinates);
+        let mapped = self.0.iter().zip(vector.0).map(|(a, b)| b - a);
+        let coords: [f32; N] = mapped.collect::<Vec<_>>().try_into().unwrap();
+        return Vector(coords);
     }
     pub fn avg(&self, vector: &Vector<N>) -> Vector<N> {
-        let mapped_iter = self.0.iter().zip(vector.0).map(|(a, b)| (a + b) / 2.0);
-        let coordinates: [f32; N] = mapped_iter.collect::<Vec<_>>().try_into().unwrap();
-        return Vector(coordinates);
+        let mapped = self.0.iter().zip(vector.0).map(|(a, b)| (a + b) / 2.0);
+        let coords: [f32; N] = mapped.collect::<Vec<_>>().try_into().unwrap();
+        return Vector(coords);
     }
     pub fn dot_product(&self, vector: &Vector<N>) -> f32 {
         let zipped_iter = self.0.iter().zip(vector.0);
         return zipped_iter.map(|(a, b)| a * b).sum::<f32>();
     }
     pub fn to_hashkey(&self) -> HashKey<N> {
-        // f32 in Rust doesn't implement hash - we use byte to deduplicate which is unsafe in that it
-        // cannot differentiate ~16 mil ways NaN is written under IEEE-754 but safe for us
+        // f32 in Rust doesn't implement hash. We use bytes to dedup. While it
+        // can't differentiate ~16M ways NaN is written, it's safe for us
         let bit_iter = self.0.iter().map(|a| a.to_bits());
-        let u32_data: [u32; N] = bit_iter.collect::<Vec<_>>().try_into().unwrap();
-        return HashKey::<N>(u32_data);
+        let data: [u32; N] = bit_iter.collect::<Vec<_>>().try_into().unwrap();
+        return HashKey::<N>(data);
     }
     pub fn sq_euc_dis(&self, vector: &Vector<N>) -> f32 {
         let zipped_iter = self.0.iter().zip(vector.0);
@@ -61,22 +63,24 @@ pub struct ANNIndex<const N: usize> {
 impl<const N: usize> ANNIndex<N> {
     fn build_hyperplane(
         indexes: &Vec<usize>,
-        all_vectors: &Vec<Vector<N>>,
+        all_vecs: &Vec<Vector<N>>,
     ) -> (HyperPlane<N>, Vec<usize>, Vec<usize>) {
         let sample: Vec<_> = indexes
             .choose_multiple(&mut rand::thread_rng(), 2)
             .collect();
-        // implicit Cartesian eq for hyperplane n * (x - x_0) = 0. n (normal vector) is the coefs x_1 to x_n
-        let coefficients = all_vectors[*sample[0]].subtract_from(&all_vectors[*sample[1]]);
-        let point_on_plane = all_vectors[*sample[0]].avg(&all_vectors[*sample[1]]);
+        // cartesian eq for hyperplane n * (x - x_0) = 0
+        // n (normal vector) is the coefs x_1 to x_n
+        let (a, b) = (*sample[0], *sample[1]);
+        let coefficients = all_vecs[a].subtract_from(&all_vecs[b]);
+        let point_on_plane = all_vecs[a].avg(&all_vecs[b]);
         let constant = -coefficients.dot_product(&point_on_plane);
-        let (mut above, mut below) = (Vec::new(), Vec::new());
         let hyperplane = HyperPlane::<N> {
-            coefficients: coefficients,
-            constant: constant,
+            coefficients,
+            constant,
         };
+        let (mut above, mut below) = (vec![], vec![]);
         for &id in indexes.iter() {
-            if hyperplane.point_is_above(&all_vectors[id]) {
+            if hyperplane.point_is_above(&all_vecs[id]) {
                 above.push(id)
             } else {
                 below.push(id)
@@ -85,15 +89,19 @@ impl<const N: usize> ANNIndex<N> {
         return (hyperplane, above, below);
     }
 
-    fn build_a_tree(max_size: i32, indexes: &Vec<usize>, all_vecs: &Vec<Vector<N>>) -> Node<N> {
+    fn build_a_tree(
+        max_size: i32,
+        indexes: &Vec<usize>,
+        all_vecs: &Vec<Vector<N>>,
+    ) -> Node<N> {
         if indexes.len() <= (max_size as usize) {
             return Node::Leaf(Box::new(LeafNode::<N>(indexes.clone())));
         }
-        let (hyperplane, above, below) = Self::build_hyperplane(indexes, all_vecs);
+        let (plane, above, below) = Self::build_hyperplane(indexes, all_vecs);
         let node_above = Self::build_a_tree(max_size, &above, all_vecs);
         let node_below = Self::build_a_tree(max_size, &below, all_vecs);
         return Node::Inner(Box::new(InnerNode::<N> {
-            hyperplane: hyperplane,
+            hyperplane: plane,
             left_node: node_below,
             right_node: node_above,
         }));
@@ -105,7 +113,7 @@ impl<const N: usize> ANNIndex<N> {
         dedup_vectors: &mut Vec<Vector<N>>,
         ids_of_dedup_vectors: &mut Vec<i32>,
     ) {
-        let mut hashes_seen = std::collections::HashSet::new();
+        let mut hashes_seen = HashSet::new();
         for i in 1..vectors.len() {
             let hash_key = vectors[i].to_hashkey();
             if !hashes_seen.contains(&hash_key) {
@@ -122,69 +130,68 @@ impl<const N: usize> ANNIndex<N> {
         vecs: &Vec<Vector<N>>,
         vec_ids: &Vec<i32>,
     ) -> ANNIndex<N> {
-        let (mut unique_vecs, mut ids, mut trees) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut unique_vecs, mut ids) = (vec![], vec![]);
         Self::deduplicate(vecs, vec_ids, &mut unique_vecs, &mut ids);
-        // Trees hold an index into the [unique_vecs] list which is not necessarily its id, if duplicates existed
+        // Trees hold an index into the [unique_vecs] list which is not
+        // necessarily its id, if duplicates existed
         let all_indexes: Vec<usize> = (0..unique_vecs.len()).collect();
-        for _ in 0..num_trees {
-            let tree = Self::build_a_tree(max_size, &all_indexes, &unique_vecs);
-            trees.push(tree);
-        }
+        let trees: Vec<_> = (0..num_trees)
+            .map(|_| Self::build_a_tree(max_size, &all_indexes, &unique_vecs))
+            .collect();
         return ANNIndex::<N> {
-            trees: trees,
-            ids: ids,
+            trees,
+            ids,
             values: unique_vecs,
         };
     }
 
     fn tree_result(
-        vector: Vector<N>,
+        query: Vector<N>,
         n: i32,
         tree: &Node<N>,
-        candidates: &mut std::collections::HashSet<usize>,
+        candidates: &mut HashSet<usize>,
     ) -> i32 {
-        // We take everything in the leaf node. If we still need, we take ones from the alternate subtree
+        // take everything in node, if still needed, take from alternate subtree
         match tree {
             Node::Leaf(box_leaf) => {
                 let leaf_values = &(box_leaf.0);
-                let num_candidates_found = std::cmp::min(n as usize, leaf_values.len());
+                let num_candidates_found = min(n as usize, leaf_values.len());
                 for i in 0..num_candidates_found {
                     candidates.insert(leaf_values[i]);
                 }
                 return num_candidates_found as i32;
             }
-            Node::Inner(box_inner) => {
-                let (correct_tree, backup_tree) = if (*box_inner).hyperplane.point_is_above(&vector)
-                {
-                    (&(box_inner.right_node), &(box_inner.left_node))
-                } else {
-                    (&(box_inner.left_node), &(box_inner.right_node))
+            Node::Inner(inner) => {
+                let above = (*inner).hyperplane.point_is_above(&query);
+                let (main, backup) = match above {
+                    true => (&(inner.right_node), &(inner.left_node)),
+                    false => (&(inner.left_node), &(inner.right_node)),
                 };
-                let mut fetched = Self::tree_result(vector, n, correct_tree, candidates);
-                if fetched < n {
-                    fetched += Self::tree_result(vector, n - fetched, backup_tree, candidates);
-                };
-                return fetched;
+                match Self::tree_result(query, n, main, candidates) {
+                    k if k < n => {
+                        k + Self::tree_result(query, n - k, backup, candidates)
+                    }
+                    k => k,
+                }
             }
         }
     }
 
-    pub fn search_approximate(&self, vector: Vector<N>, top_k: i32) -> Vec<(i32, f32)> {
-        let mut candidates = std::collections::HashSet::new();
+    pub fn search_approximate(
+        &self,
+        query: Vector<N>,
+        top_k: i32,
+    ) -> Vec<(i32, f32)> {
+        let mut candidates = HashSet::new();
         for tree in self.trees.iter() {
-            Self::tree_result(vector, top_k, tree, &mut candidates);
+            Self::tree_result(query, top_k, tree, &mut candidates);
         }
-        let mut idx_sq_euc_dis: Vec<(usize, f32)> = candidates
-            .iter()
-            .map(|&idx| (idx, self.values[idx].sq_euc_dis(&vector)))
-            .collect();
-        idx_sq_euc_dis.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        let mut final_candidates: Vec<(i32, f32)> = Vec::new();
-        let num_candidates_to_return = std::cmp::min(top_k as usize, candidates.len());
-        for i in 0..num_candidates_to_return {
-            let (index, distance) = idx_sq_euc_dis[i];
-            final_candidates.push((self.ids[index], distance));
-        }
-        return final_candidates;
+        candidates
+            .into_iter()
+            .map(|idx| (idx, self.values[idx].sq_euc_dis(&query)))
+            .sorted_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .take(top_k as usize)
+            .map(|(idx, dis)| (self.ids[idx], dis))
+            .collect()
     }
 }
