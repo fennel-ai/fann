@@ -154,7 +154,7 @@ impl<const N: usize> ANNIndex<N> {
         // take everything in node, if still needed, take from alternate subtree
         match tree {
             Node::Leaf(box_leaf) => {
-                let leaf_values = &(**box_leaf).0;
+                let leaf_values = &(box_leaf.0);
                 let num_candidates_found = min(n as usize, leaf_values.len());
                 for i in 0..num_candidates_found {
                     candidates.insert(leaf_values[i]);
@@ -164,8 +164,8 @@ impl<const N: usize> ANNIndex<N> {
             Node::Inner(inner) => {
                 let above = (*inner).hyperplane.point_is_above(&query);
                 let (main, backup) = match above {
-                    true => (&(*inner).right_node, &(*inner).left_node),
-                    false => (&(*inner).left_node, &(*inner).right_node),
+                    true => (&(inner.right_node), &(inner.left_node)),
+                    false => (&(inner.left_node), &(inner.right_node)),
                 };
                 match Self::tree_result(query, n, main, candidates) {
                     k if k < n => {
