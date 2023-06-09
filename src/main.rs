@@ -4,7 +4,10 @@ use std::io::BufRead;
 mod search;
 use search::{ANNIndex, Vector};
 use std::collections::{HashMap, HashSet};
-use clap::{App, Arg, ArgMatches};
+use clap::{App, Arg};
+use json;
+use std::fs::File;
+use std::io::Write;
 
 fn search_exhaustive<const N: usize>(
     all_data: &Vec<Vector<N>>,
@@ -73,6 +76,7 @@ fn build_and_benchmark_index<const N: usize>(
     num_trees: i32,
     max_node_size: i32,
     top_k: i32,
+    sample_idx: Option<Vec<i32>>
 ) -> Vec<HashSet<i32>> {
     println!(
         "dimensions={}, num_trees={}, max_node_size={}, top_k={}",
@@ -90,10 +94,10 @@ fn build_and_benchmark_index<const N: usize>(
     let duration = start.elapsed();
     println!("Built ANN index in {}-D in {:?}", N, duration);
     // Benchmark it with 1000 sequential queries
-    let sample_idx: Vec<i32> = (0..my_input_data.len() as i32)
+    let benchmark_idx: Vec<i32> = (0..my_input_data.len() as i32)
         .choose_multiple(&mut rand::thread_rng(), 1000);
     let mut search_vectors: Vec<search::Vector<N>> = Vec::new();
-    for idx in sample_idx {
+    for idx in benchmark_idx {
         search_vectors.push(my_input_data[idx as usize]);
     }
     let start = std::time::Instant::now();
@@ -102,9 +106,20 @@ fn build_and_benchmark_index<const N: usize>(
     }
     let duration = start.elapsed() / 1000;
     println!("Bulk ANN-search in {}-D has average time {:?}", N, duration);
-    // For all indices, find the top_k neighbours and return that data
+    // For all indices, find the top_k neighbours and return that data. If
+    // sample_idx is not provided we run on all the indices.
     let start = std::time::Instant::now();
-    let index_results = my_input_data
+    let mut subset: Vec<search::Vector<N>> = Vec::new();
+    let sample_from_my_data = match sample_idx {
+        Some(sample_indices) => {
+            for idx in sample_indices {
+                subset.push(my_input_data[idx as usize]);
+            }
+            &subset
+        }
+        None => my_input_data
+    };
+    let index_results = sample_from_my_data
         .par_iter()
         .map(|&vector| {
             search_approximate_as_hashset(&index, vector, top_k)
@@ -115,43 +130,80 @@ fn build_and_benchmark_index<const N: usize>(
     return index_results;
 }
 
-fn calculate_metrics_on_index_result<const N: usize>(
+fn analyze_average_euclidean_metrics<const N: usize>(
+    string_index_identifier: String,
     all_embedding_data: &Vec<Vector<N>>,
-    exhaustive_results: &Vec<HashSet<i32>>,
     index_results: &Vec<HashSet<i32>>,
+    sample_idx: Option<Vec<i32>>
 ) {
-    // We wish to calculate the average Euclidean distance and the recall@k with
-    // k=20. However, running this for all 1 mil embeddings will make the code
-    // run long. We thus take a sample size of 30k out of the total 1 mil to get
-    // an estimate for these values. The distances are computed against the full
-    // 300-D embeddings and not the reduced dimensionality in the index.
     let start = std::time::Instant::now();
-    let mut total_euc_dist = 0.0;
-    let mut total_recall_pct = 0.0;
+    let mut subset: Vec<search::Vector<N>> = Vec::new();
+    let sample_from_my_data = match sample_idx {
+        Some(sample_indices) => {
+            for idx in sample_indices {
+                subset.push(all_embedding_data[idx as usize]);
+            }
+            &subset
+        }
+        None => all_embedding_data
+    };
+    let mut euc_distances: Vec<f32> = Vec::new();
     for (i, neighbours) in index_results.iter().enumerate() {
         // Ignore the distance here since we must compute it against the full 300-D embedding
         let mut sum_of_dist_to_neighbours = 0.0;
-        let mut num_matches_with_brute_results = 0.0;
         for &neighbour_id in neighbours.iter() {
-            sum_of_dist_to_neighbours += all_embedding_data[i]
+            sum_of_dist_to_neighbours += sample_from_my_data[i]
                 .sq_euc_dis(&all_embedding_data[neighbour_id as usize])
                 .sqrt();
-            if exhaustive_results[i].contains(&neighbour_id) {
-                num_matches_with_brute_results += 1.0;
-            }
         }
-        total_euc_dist += sum_of_dist_to_neighbours / neighbours.len() as f32;
-        total_recall_pct +=
-            num_matches_with_brute_results / neighbours.len() as f32;
+        euc_distances.push(sum_of_dist_to_neighbours);
     }
-    let average_dist = total_euc_dist / exhaustive_results.len() as f32;
-    let average_recall = total_recall_pct / exhaustive_results.len() as f32;
-    let duration = start.elapsed();
-    println!(
-        "Average Euclidean Distance = {}, Average Recall% = {} in {:?}",
-        average_dist, average_recall, duration
-    );
+    let mean_euc: f32 = euc_distances.iter().sum::<f32>() / euc_distances.len() as f32;
+    println!("Average Euclidean: {} : {}", string_index_identifier, mean_euc);
+    let json_string = json::stringify(euc_distances);
+    // Write the JSON to a file
+    let file_name = format!("{}.json", string_index_identifier);
+    let mut file = File::create(file_name).expect("Failed to create file");
+    file.write_all(json_string.as_bytes()).expect("Failed to write JSON to file");
 }
+
+// fn calculate_metrics_on_index_result<const N: usize>(
+//     all_embedding_data: &Vec<Vector<N>>,
+//     exhaustive_results: &Vec<HashSet<i32>>,
+//     index_results: &Vec<HashSet<i32>>,
+// ) {
+//     // We wish to calculate the average Euclidean distance and the recall@k with
+//     // k=20. However, running this for all 1 mil embeddings will make the code
+//     // run long. We thus take a sample size of 30k out of the total 1 mil to get
+//     // an estimate for these values. The distances are computed against the full
+//     // 300-D embeddings and not the reduced dimensionality in the index.
+//     let start = std::time::Instant::now();
+//     let mut total_euc_dist = 0.0;
+//     let mut total_recall_pct = 0.0;
+//     for (i, neighbours) in index_results.iter().enumerate() {
+//         // Ignore the distance here since we must compute it against the full 300-D embedding
+//         let mut sum_of_dist_to_neighbours = 0.0;
+//         let mut num_matches_with_brute_results = 0.0;
+//         for &neighbour_id in neighbours.iter() {
+//             sum_of_dist_to_neighbours += all_embedding_data[i]
+//                 .sq_euc_dis(&all_embedding_data[neighbour_id as usize])
+//                 .sqrt();
+//             if exhaustive_results[i].contains(&neighbour_id) {
+//                 num_matches_with_brute_results += 1.0;
+//             }
+//         }
+//         total_euc_dist += sum_of_dist_to_neighbours / neighbours.len() as f32;
+//         total_recall_pct +=
+//             num_matches_with_brute_results / neighbours.len() as f32;
+//     }
+//     let average_dist = total_euc_dist / exhaustive_results.len() as f32;
+//     let average_recall = total_recall_pct / exhaustive_results.len() as f32;
+//     let duration = start.elapsed();
+//     println!(
+//         "Average Euclidean Distance = {}, Average Recall% = {} in {:?}",
+//         average_dist, average_recall, duration
+//     );
+// }
 
 fn main() {
     // Parse command line arguments
@@ -212,13 +264,15 @@ fn main() {
     // Build, benchmark and visualize our index with default parameters
     let words_to_visualize: Vec<String> = ["river", "war", "love", "education"].into_iter().map(|x| x.to_owned()).collect();
     let index_results = build_and_benchmark_index::<DIM>(
-        &my_input_data, 3, 15, TOP_K,
+        &my_input_data, 3, 15, TOP_K, None
     );
-    // calculate_metrics_on_index_result::<DIM>(
-    //     &my_input_data,
-    //     &exhaustive_results,
-    //     &index_results,
-    // );
+    let experiment = format!("trees_{}_max_node_{}_k_{}", 3, 15, TOP_K);
+    analyze_average_euclidean_metrics::<DIM>(
+        experiment, &my_input_data, &index_results, None
+    )
+    // analyze_recall_metrics::<DIM>(
+    //     &my_input_data, &exhaustive_results, &index_results, None
+    // )
     // // Try some other parameters. New values for max_node_size, num_trees at dim=300. See how we can make it
     // // better in its accuracy/ quality.
     // let no_words: Vec<String> = Vec::new();

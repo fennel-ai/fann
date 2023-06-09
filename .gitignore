@@ -11,5 +11,8 @@ Cargo.lock
 
 # IDE/OS-based additional files
 .DS_Store
+__pycache__
 
+# Files only for benchmarking that are auto-downloaded - only possible to move to
+# git with LFS but not necessary
 data/*
