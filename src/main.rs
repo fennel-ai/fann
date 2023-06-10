@@ -301,6 +301,11 @@ fn main() {
     let no_words: Vec<String> = Vec::new();
     for max_size in [5, 15, 30] {
         for num_trees in [3, 9, 15] {
+            // Skip num_trees=3 and max_size=15 since that was our default config
+            // we already saw above.
+            if (num_trees == 3) && (max_size == 15) {
+                continue;
+            }
             let index_results = build_and_benchmark_index::<DIM>(
                 &my_input_data,
                 num_trees,
