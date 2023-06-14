@@ -2,10 +2,10 @@ use rand::prelude::IteratorRandom;
 use rayon::prelude::*;
 use std::io::BufRead;
 mod search;
-use search::{ANNIndex, Vector};
-use std::collections::{HashMap, HashSet};
 use clap::{App, Arg};
 use json;
+use search::{ANNIndex, Vector};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 
@@ -79,7 +79,7 @@ fn build_and_benchmark_index<const N: usize>(
     words_to_visualize: &Vec<String>,
     word_to_idx_mapping: &HashMap<String, usize>,
     idx_to_word_mapping: &HashMap<usize, String>,
-    sample_idx: Option<&Vec<i32>>
+    sample_idx: Option<&Vec<i32>>,
 ) -> Vec<HashSet<i32>> {
     println!(
         "dimensions={}, num_trees={}, max_node_size={}, top_k={}",
@@ -138,16 +138,18 @@ fn build_and_benchmark_index<const N: usize>(
             }
             &subset
         }
-        None => my_input_data
+        None => my_input_data,
     };
     let index_results: Vec<HashSet<i32>> = sample_from_my_data
         .par_iter()
-        .map(|&vector| {
-            search_approximate_as_hashset(&index, vector, top_k)
-        })
+        .map(|&vector| search_approximate_as_hashset(&index, vector, top_k))
         .collect();
     let duration = start.elapsed();
-    println!("Collected {} quality results in {:?}", index_results.len(), duration);
+    println!(
+        "Collected {} quality results in {:?}",
+        index_results.len(),
+        duration
+    );
     return index_results;
 }
 
@@ -155,7 +157,7 @@ fn analyze_average_euclidean_metrics<const N: usize>(
     json_path: &String,
     all_embedding_data: &Vec<Vector<N>>,
     index_results: &Vec<HashSet<i32>>,
-    sample_idx: Option<&Vec<i32>>
+    sample_idx: Option<&Vec<i32>>,
 ) {
     let start = std::time::Instant::now();
     let mut subset: Vec<search::Vector<N>> = Vec::new();
@@ -172,7 +174,7 @@ fn analyze_average_euclidean_metrics<const N: usize>(
             }
             &subset
         }
-        None => all_embedding_data
+        None => all_embedding_data,
     };
     let mut euc_distances: Vec<f32> = Vec::new();
     for (i, neighbours) in index_results.iter().enumerate() {
@@ -183,15 +185,18 @@ fn analyze_average_euclidean_metrics<const N: usize>(
                 .sq_euc_dis(&all_embedding_data[neighbour_id as usize])
                 .sqrt();
         }
-        let avg_dist_to_neighbours = sum_dist_to_neighbours / neighbours.len() as f32;
+        let avg_dist_to_neighbours =
+            sum_dist_to_neighbours / neighbours.len() as f32;
         euc_distances.push(avg_dist_to_neighbours);
     }
-    let mean_euc: f32 = euc_distances.iter().sum::<f32>() / euc_distances.len() as f32;
+    let mean_euc: f32 =
+        euc_distances.iter().sum::<f32>() / euc_distances.len() as f32;
     println!("Average Euclidean {} in {:?}", mean_euc, start.elapsed());
     let json_string = json::stringify(euc_distances);
     // Write the JSON to a file
     let mut file = File::create(json_path).expect("Failed to create file");
-    file.write_all(json_string.as_bytes()).expect("Failed to write JSON to file");
+    file.write_all(json_string.as_bytes())
+        .expect("Failed to write JSON to file");
 }
 
 fn analyze_recall_metrics<const N: usize>(
@@ -220,8 +225,10 @@ fn analyze_recall_metrics<const N: usize>(
 
 fn main() {
     // Parse command line arguments
-    let data_dir_arg = Arg::with_name("data-dir").takes_value(true).required(true);
-    let input_vec_arg = Arg::with_name("input-vec").takes_value(true).required(true);
+    let data_dir_arg =
+        Arg::with_name("data-dir").takes_value(true).required(true);
+    let input_vec_arg =
+        Arg::with_name("input-vec").takes_value(true).required(true);
     let app = App::new("FANN").arg(data_dir_arg).arg(input_vec_arg);
     let matches = app.get_matches();
     let data_dir = matches.value_of("data-dir").unwrap();
@@ -246,9 +253,9 @@ fn main() {
     search_exhaustive::<DIM>(&my_input_data, &my_input_data[0], TOP_K);
     let duration = start.elapsed();
     println!("Found vectors via brute-search in {:?}", duration);
-    // Take 1000 random vectors from the input data and find its TOP_K nearest 
-    // neighbors using the exhaustive/brute-force approach. This allows us to 
-    // calculate recall for our implementations. This is a list of randomly chosen 
+    // Take 1000 random vectors from the input data and find its TOP_K nearest
+    // neighbors using the exhaustive/brute-force approach. This allows us to
+    // calculate recall for our implementations. This is a list of randomly chosen
     // indices from our main embedding set - we use a subset to
     // estimate our metrics due to the computation cost.
     let start = std::time::Instant::now();
@@ -258,8 +265,8 @@ fn main() {
         .unwrap();
     let sample_idx: Vec<i32> = (0..my_input_data.len() as i32)
         .choose_multiple(&mut rand::thread_rng(), 1000);
-    // Make a vector of hashsets where hashset at position i represents the exhaustive 
-    // nearest neighbours for the embedding at position idx in my_input_data, where idx 
+    // Make a vector of hashsets where hashset at position i represents the exhaustive
+    // nearest neighbours for the embedding at position idx in my_input_data, where idx
     // is at position i in sample_idx. This means [exhaustive_results] and [sample_idx]
     // are perfectly aligned / lined-up
     let exhaustive_results: Vec<std::collections::HashSet<i32>> = sample_idx
@@ -275,28 +282,35 @@ fn main() {
     let duration = start.elapsed();
     println!("Found exhaustive neighbors for sample in {:?}", duration);
     // Build, benchmark and visualize our index with default parameters
-    let words_to_visualize: Vec<String> = ["river", "war", "love", "education"].into_iter().map(|x| x.to_owned()).collect();
+    let words_to_visualize: Vec<String> = ["river", "war", "love", "education"]
+        .into_iter()
+        .map(|x| x.to_owned())
+        .collect();
     let index_results = build_and_benchmark_index::<DIM>(
-        &my_input_data, 
+        &my_input_data,
         3,
         15,
         TOP_K,
         &words_to_visualize,
         &word_to_idx_mapping,
         &idx_to_word_mapping,
-        None
+        None,
     );
-    let path = format!("{}/trees_{}_max_node_{}_k_{}.json", data_dir, 3, 15, TOP_K);
+    let path =
+        format!("{}/trees_{}_max_node_{}_k_{}.json", data_dir, 3, 15, TOP_K);
     analyze_average_euclidean_metrics::<DIM>(
-        &path, &my_input_data, &index_results, None
+        &path,
+        &my_input_data,
+        &index_results,
+        None,
     );
     // We only have exhaustive data for [sample_idx]
-    let reduced_index_results: Vec<HashSet<i32>> = sample_idx.iter().map(
-        |&idx| index_results[idx as usize].clone()).collect();
-    analyze_recall_metrics::<DIM>(
-        &exhaustive_results, &reduced_index_results
-    );
-    // Try some other parameters. New values for max_node_size, num_trees at dim=300. 
+    let reduced_index_results: Vec<HashSet<i32>> = sample_idx
+        .iter()
+        .map(|&idx| index_results[idx as usize].clone())
+        .collect();
+    analyze_recall_metrics::<DIM>(&exhaustive_results, &reduced_index_results);
+    // Try some other parameters. New values for max_node_size, num_trees at dim=300.
     // See how we can make it better in its accuracy/ quality.
     let no_words: Vec<String> = Vec::new();
     for max_size in [5, 15, 30] {
@@ -314,16 +328,20 @@ fn main() {
                 &no_words,
                 &word_to_idx_mapping,
                 &idx_to_word_mapping,
-                Some(&sample_idx)
+                Some(&sample_idx),
             );
-            let path = format!("{}/trees_{}_max_node_{}_k_{}.json", data_dir, num_trees, max_size, TOP_K);
+            let path = format!(
+                "{}/trees_{}_max_node_{}_k_{}.json",
+                data_dir, num_trees, max_size, TOP_K
+            );
             analyze_average_euclidean_metrics::<DIM>(
-                &path, &my_input_data, &index_results, Some(&sample_idx)
+                &path,
+                &my_input_data,
+                &index_results,
+                Some(&sample_idx),
             );
             // We only have exhaustive data for [sample_idx]
-            analyze_recall_metrics::<DIM>(
-                &exhaustive_results, &index_results
-            );
-        } 
+            analyze_recall_metrics::<DIM>(&exhaustive_results, &index_results);
+        }
     }
 }

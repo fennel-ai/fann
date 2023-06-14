@@ -25,9 +25,9 @@ else
     echo "$WIKIDATA_FILE already exists."
 fi
 
-# Run the faiss benchmarking
-# FAISS_FILE="${SCRIPT_DIR}/faiss_run.py"
-# python3 "$FAISS_FILE" --input-vec "$WIKIDATA_FILE" --data-dir "$DATA_DIR"
+# run the faiss benchmarking
+FAISS_FILE="${SCRIPT_DIR}/faiss_run.py"
+python3 "$FAISS_FILE" --input-vec "$WIKIDATA_FILE" --data-dir "$DATA_DIR"
 
 # Benchmark our Rust index
 CWD_TO_PRESERVE=$(pwd)
