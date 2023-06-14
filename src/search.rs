@@ -1,8 +1,8 @@
+use dashmap::DashSet;
 use itertools::Itertools;
 use rand::prelude::SliceRandom;
 use rayon::prelude::*;
 use std::{cmp::min, collections::HashSet};
-use dashmap::DashSet;
 
 #[derive(Eq, PartialEq, Hash)]
 pub struct HashKey<const N: usize>([u32; N]);
@@ -137,7 +137,8 @@ impl<const N: usize> ANNIndex<N> {
         // Trees hold an index into the [unique_vecs] list which is not
         // necessarily its id, if duplicates existed
         let all_indexes: Vec<usize> = (0..unique_vecs.len()).collect();
-        let trees: Vec<_> = (0..num_trees).into_par_iter()
+        let trees: Vec<_> = (0..num_trees)
+            .into_par_iter()
             .map(|_| Self::build_a_tree(max_size, &all_indexes, &unique_vecs))
             .collect();
         return ANNIndex::<N> {
@@ -185,10 +186,9 @@ impl<const N: usize> ANNIndex<N> {
         top_k: i32,
     ) -> Vec<(i32, f32)> {
         let candidates = DashSet::new();
-        self.trees.par_iter()
-            .for_each(|tree| {
-                Self::tree_result(query, top_k, tree, &candidates);
-            });
+        self.trees.par_iter().for_each(|tree| {
+            Self::tree_result(query, top_k, tree, &candidates);
+        });
         candidates
             .into_iter()
             .map(|idx| (idx, self.values[idx].sq_euc_dis(&query)))
